@@ -1,84 +1,122 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
-import fitz
+from agent_workflow import run_invoice_agent
+from extractor import (
+    extract_local_invoice_data,
+    extract_pdf_text,
+    get_attachment_path,
+    load_email,
+)
 
 
-def load_email(email_path: Path) -> dict:
-    if not email_path.exists():
-        raise FileNotFoundError(f"Email file not found: {email_path}")
+def run_local_extraction(email_path: Path) -> Path:
+    """Run deterministic extraction without calling the OpenAI API."""
 
-    try:
-        with email_path.open("r", encoding="utf-8") as file:
-            return json.load(file)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid email JSON: {exc}") from exc
+    email_data = load_email(email_path)
+    attachment_path = get_attachment_path(email_data, email_path)
+    pdf_text, page_count = extract_pdf_text(attachment_path)
+
+    payload = extract_local_invoice_data(
+        email_data=email_data,
+        pdf_text=pdf_text,
+        page_count=page_count,
+    )
+
+    output_directory = Path("outputs")
+    output_directory.mkdir(parents=True, exist_ok=True)
+
+    output_path = output_directory / "local_extraction.json"
+    output_path.write_text(
+        payload.model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+
+    print("\nLocal invoice extraction completed.")
+    print(f"Vendor: {payload.vendor.name}")
+    print(f"Invoice number: {payload.invoice_number}")
+    print(f"Invoice date: {payload.invoice_date}")
+    print(f"Due date: {payload.due_date}")
+    print(f"Customer PO: {payload.customer_po}")
+    print(f"Subtotal: {payload.subtotal}")
+    print(f"Total tax: {payload.total_tax}")
+    print(f"Total due: {payload.total_due}")
+    print(f"Line items: {len(payload.line_items)}")
+    print(f"Tax records: {len(payload.taxes)}")
+    print(f"Ship-to locations: {len(payload.ship_to_locations)}")
+    print(f"Output: {output_path}")
+
+    if payload.extraction_warnings:
+        print("\nWarnings:")
+
+        for warning in payload.extraction_warnings:
+            print(f"- {warning}")
+
+    return output_path
 
 
-def get_attachment_path(email_data: dict, email_path: Path) -> Path:
-    attachments = email_data.get("Message", {}).get("Attachments", [])
+def run_agent_workflow(email_path: Path) -> None:
+    """Run the complete OpenAI Agents SDK workflow."""
 
-    if not attachments:
-        raise ValueError("No attachments were listed in the email.")
+    print("Running OpenAI Agents SDK invoice workflow...")
 
-    attachment_name = attachments[0].get("Name")
+    final_output, context = run_invoice_agent(email_path)
 
-    if not attachment_name:
-        raise ValueError("The email attachment does not have a filename.")
+    print("\nAgent workflow completed.")
+    print(f"Agent response: {final_output}")
 
-    attachment_path = email_path.parent / attachment_name
+    print("\nGenerated files:")
 
-    if not attachment_path.exists():
-        raise FileNotFoundError(
-            f"Attachment referenced by the email was not found: {attachment_path}"
-        )
+    for output_name, output_path in context.notification_outputs.items():
+        print(f"- {output_name}: {output_path}")
 
-    return attachment_path
-
-
-def extract_pdf_text(pdf_path: Path) -> tuple[str, int]:
-    try:
-        document = fitz.open(pdf_path)
-    except Exception as exc:
-        raise ValueError(f"Unable to open PDF: {exc}") from exc
-
-    try:
-        page_text = [page.get_text("text") for page in document]
-        return "\n".join(page_text), document.page_count
-    finally:
-        document.close()
+    if context.payload is not None:
+        print("\nExtracted invoice:")
+        print(f"- Vendor: {context.payload.vendor.name}")
+        print(f"- Invoice number: {context.payload.invoice_number}")
+        print(f"- Customer PO: {context.payload.customer_po}")
+        print(f"- Total due: {context.payload.total_due}")
+        print(f"- Line items: {len(context.payload.line_items)}")
+        print(f"- Ship-to locations: {len(context.payload.ship_to_locations)}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Read an inbound email and its invoice PDF attachment."
+        description=(
+            "Process an inbound email and invoice PDF using "
+            "the OpenAI Agents SDK."
+        )
     )
+
     parser.add_argument(
         "--email",
         required=True,
         type=Path,
         help="Path to the inbound email JSON file.",
     )
+
+    parser.add_argument(
+        "--local-only",
+        action="store_true",
+        help="Run local PDF/email parsing without OpenAI API requests.",
+    )
+
     args = parser.parse_args()
 
     try:
-        email_data = load_email(args.email)
-        attachment_path = get_attachment_path(email_data, args.email)
-        pdf_text, page_count = extract_pdf_text(attachment_path)
+        if args.local_only:
+            run_local_extraction(args.email)
+        else:
+            run_agent_workflow(args.email)
 
-        message = email_data.get("Message", {})
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        print(f"\nError: {exc}")
+        raise SystemExit(1) from exc
 
-        print("Input validation successful")
-        print(f"Subject: {message.get('Subject', 'Unknown')}")
-        print(f"Attachment: {attachment_path}")
-        print(f"PDF pages: {page_count}")
-        print(f"Extracted PDF characters: {len(pdf_text)}")
-
-    except (FileNotFoundError, ValueError) as exc:
-        print(f"Error: {exc}")
+    except Exception as exc:
+        print(f"\nUnexpected error: {type(exc).__name__}: {exc}")
         raise SystemExit(1) from exc
 
 

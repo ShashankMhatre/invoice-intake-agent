@@ -8,4 +8,5 @@ dependencies = [
     "pydantic>=2.13.4",
     "pymupdf>=1.27.2.3",
     "python-dotenv>=1.2.2",
+    "truststore>=0.10.4",
 ]
