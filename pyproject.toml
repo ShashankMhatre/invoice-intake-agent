@@ -1,0 +1,11 @@
+[project]
+name = "invoice-intake-agent"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "openai>=2.43.0",
+    "openai-agents>=0.17.6",
+    "pydantic>=2.13.4",
+    "pymupdf>=1.27.2.3",
+    "python-dotenv>=1.2.2",
+]
